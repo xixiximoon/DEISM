@@ -18,7 +18,7 @@ def test_deism_arg_simulation():
         "impedance",
     )
     deism.update_freqs()
-    deism.update_images()
+    deism.update_source_receiver()
     deism.update_directivities()
     pressure = deism.run_DEISM()
 
