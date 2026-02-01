@@ -44,6 +44,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libgl1-mesa-dev build-essential
 
+      # Step 3b: Setup C++ compiler for Windows (for count_reflections compilation)
+      - name: (Windows) Setup C++ compiler for count_reflections
+        if: matrix.os == 'windows-latest'
+        run: |
+          # Try to use existing g++ if available, otherwise try to install MinGW
+          if (Get-Command g++ -ErrorAction SilentlyContinue) {
+            echo "g++ is already available"
+          } else {
+            # Try to install MinGW via Chocolatey (if available)
+            if (Get-Command choco -ErrorAction SilentlyContinue) {
+              choco install mingw -y
+              $mingwPath = "$env:ChocolateyInstall\lib\mingw\tools\install\mingw64\bin"
+              if (Test-Path $mingwPath) {
+                echo "$mingwPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              }
+            } else {
+              echo "Warning: g++ not found and Chocolatey not available. count_reflections will not be compiled."
+              echo "This is non-fatal - the package will still work without the C++ optimization."
+            }
+          }
+
       # Step 4: Install dependencies using pip
       - name: Install dependencies
         run: |

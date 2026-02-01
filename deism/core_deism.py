@@ -1,3 +1,10 @@
+"""
+Core functions used in DEISM and DEISM-ARG.
+Contributor:
+Zeyu Xu
+"""
+
+import gc
 import time
 import numpy as np
 from scipy import special as scy
@@ -18,6 +25,14 @@ from deism.data_loader import *
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
 
+# Try to import C++ wrapper for fast counting (optional)
+try:
+    from deism.count_reflections_wrapper import count_reflections_cpp
+
+    CPP_COUNTING_AVAILABLE = True
+except (ImportError, RuntimeError):
+    CPP_COUNTING_AVAILABLE = False
+
 
 # -------------------------------
 # About new features
@@ -29,6 +44,9 @@ class DEISM:
         self.mode = mode
         self.roomtype = roomtype
         self.auto_update = True  # TODO, keep it or not?
+        self.track_updated_where = True
+        # Some notes for the auto_update feature:
+        # If the auto_update feature is set to True, the parameters will be updated automatically
         self.init_params()
         self.update_room()
 
@@ -49,13 +67,27 @@ class DEISM:
         ):  # no input in cmd will also run
             # Use static methods for efficient conflict checking
             ConflictChecks.check_all_conflicts(params)
+            # Add a new key "updated_where" to the params dictionary
+            if self.track_updated_where:
+                params["track_updated_where"] = True
+                params["updated_where"] = {}
+                for key in params.keys():
+                    # Add the function name "cmdArgsToDict" to the updated_where dictionary, and the key name as the new key, and the value is a list containing the function name "cmdArgsToDict"
+                    params["updated_where"][key] = ["init_params"]
             self.params = params
 
-    def update_images(self, source=None, receiver=None):
-        """Update images with conflict checking"""
+    # def est_max_reflection_order(self):
+
+    def update_source_receiver(self, source=None, receiver=None):
+        """Update source and receiver positions with conflict checking"""
         # -----------------------------------------------------------
         # Check conflicts before updating images
         # Use default source and receiver if not given
+        # Updated parameters here:
+        # 1. posSource
+        # 2. posReceiver
+        # 3. images
+        # 4. reflection_matrix if roomtype is convex
         if source is None:
             source = self.params["posSource"]
         if receiver is None:
@@ -70,17 +102,36 @@ class DEISM:
         # Calculate images
         if self.roomtype == "shoebox":
             self.params["images"] = pre_calc_images_src_rec_optimized_nofs(self.params)
+            # Add the function name "update_source_receiver" to the updated_where dictionary
+            for key in ["posSource", "posReceiver", "images"]:
+                self._update_where_tracking(key, "update_source_receiver")
         elif self.roomtype == "convex":
             # TODO: Better writing here?
             from deism.core_deism_arg import get_ref_paths_ARG
 
+            # Update images
             self.room_convex.update_images(source, receiver)
             self.params = get_ref_paths_ARG(self.params, self.room_convex)
+            # Add the function name "update_source_receiver" to the updated_where dictionary
+            for key in ["posSource", "posReceiver", "images"]:
+                self._update_where_tracking(key, "update_source_receiver")
+
         # -----------------------------------------------------------
         # If use DEISM-ORG or DEISM-LC, merge images
         if self.params["DEISM_method"] == "ORG" or self.params["DEISM_method"] == "LC":
             self.params["images"] = merge_images(self.params["images"])
         # -----------------------------------------------------------
+
+    def _update_where_tracking(self, parameter_name, function_name):
+        """
+        Helper function to safely update the updated_where tracking dictionary
+        """
+        if not self.track_updated_where:
+            return
+        if parameter_name not in self.params["updated_where"]:
+            self.params["updated_where"][parameter_name] = [function_name]
+        else:
+            self.params["updated_where"][parameter_name].append(function_name)
 
     def update_room(
         self, roomDimensions=None, wallCenters=None, roomVolumn=None, roomAreas=None
@@ -105,44 +156,52 @@ class DEISM:
                 length = roomDimensions[0]
                 width = roomDimensions[1]
                 height = roomDimensions[2]
+                self.params["roomSize"] = roomDimensions
             else:
                 length = self.params["roomSize"][0]
                 width = self.params["roomSize"][1]
                 height = self.params["roomSize"][2]
-            if roomVolumn is not None:
-                self.params["roomVolumn"] = roomVolumn
-            else:
-                self.params["roomVolumn"] = length * width * height
-            if roomAreas is not None:
-                self.params["roomAreas"] = roomAreas
-            else:
-                # all the areas of the walls
-                # Order from walls x1, x2, y1, y2, z1, z2
-                # For six walls, wall1, wall3, wall2, wall4, floor, ceiling
-                self.params["roomAreas"] = np.array(
-                    [
-                        width * height,
-                        width * height,
-                        length * height,
-                        length * height,
-                        length * width,
-                        length * width,
-                    ]
-                )
+            # Update room volumn
+            self.params["roomVolumn"] = length * width * height
+            # Update room areas
+            # all the areas of the walls
+            # Order from walls x1, x2, y1, y2, z1, z2
+            # For six walls, wall1, wall3, wall2, wall4, floor, ceiling
+            self.params["roomAreas"] = np.array(
+                [
+                    width * height,
+                    width * height,
+                    length * height,
+                    length * height,
+                    length * width,
+                    length * width,
+                ]
+            )
+            # Add the function name "update_room" to the updated_where dictionary
+            for key in ["roomSize", "roomVolumn", "roomAreas"]:
+                self._update_where_tracking(key, "update_room")
         elif self.roomtype == "convex":
             # Input update
             if roomDimensions is not None:
                 self.params["vertices"] = roomDimensions
+                # Update the updated_where dictionary
+                self._update_where_tracking("vertices", "update_room")
             if wallCenters is not None:
                 self.params["wallCenters"] = wallCenters
+                # Update the updated_where dictionary
+                self._update_where_tracking("wallCenters", "update_room")
             else:
                 pass
             # TODO: Calculate volumn or areas for convex room?
             # Input known volumn and areas
             if roomVolumn is not None:
                 self.params["roomVolumn"] = roomVolumn
+                # Update the updated_where dictionary
+                self._update_where_tracking("roomVolumn", "update_room")
             if roomAreas is not None:
                 self.params["roomAreas"] = roomAreas
+                # Update the updated_where dictionary
+                self._update_where_tracking("roomAreas", "update_room")
             else:
                 pass
         # For other rooms, raise an error
@@ -162,6 +221,7 @@ class DEISM:
         """
         # Conversions
         if datain is not None and datatype is not None:
+            # If new input is given, update the givenMaterials
             if freqs_bands is None:
                 # Set a default single value
                 freqs_bands = np.array([1000])
@@ -175,7 +235,9 @@ class DEISM:
                 # For convex room, T60 input is not supported
                 if self.roomtype == "convex":
                     # TODO: Support T60 input for convex room
-                    raise ValueError("T60 input is not supported for convex room")
+                    raise ValueError(
+                        "T60 input is not supported for convex room yet, please use impedance or absorption coefficients instead"
+                    )
                 else:
                     self.params["reverberationTime"] = datain
             ConflictChecks.wall_material_checks(self.params)
@@ -211,6 +273,9 @@ class DEISM:
             # If no new input is given, use the existing impedance, absorption coefficients, and reverberation time
             datatype = self.params["givenMaterials"][0]
             freqs_bands = np.array([1000])
+            # -----------------------------------------------------------
+            # Convert to correct format
+            # -----------------------------------------------------------
             # TODO: add other cases
             if datatype == "impedance":
                 datain = load_format_materials_checks(
@@ -230,6 +295,9 @@ class DEISM:
                     )
             else:
                 raise ValueError("The parameter type is not supported")
+            # -----------------------------------------------------------
+            # Conversion between the parameters
+            # -----------------------------------------------------------
             if self.roomtype == "shoebox":
                 imp, abs_coeff, t60 = convert_imp_abs_t60_shoebox(
                     self.params["roomVolumn"],
@@ -254,6 +322,7 @@ class DEISM:
                 self.params["impedance"] = imp
                 self.params["absorpCoefficient"] = abs_coeff
                 self.params["reverberationTime"] = t60
+
             # TODO: add other cases
             # Check conflicts before updating impedance
             if not self.params["silentMode"]:
@@ -261,10 +330,17 @@ class DEISM:
         # -----------------------------------------------------------
         # set initial coarse frequency bands for the materials
         self.params["freqs_bands"] = freqs_bands
+        # Update the updated_where dictionary
+        self._update_where_tracking("freqs_bands", "update_wall_materials")
+        for key in ["impedance", "absorpCoefficient", "reverberationTime"]:
+            self._update_where_tracking(key, "update_wall_materials")
         # -----------------------------------------------------------
         # Update the n1, n2, n3 based on the reverberation time and room size and sound speed
         if self.roomtype == "shoebox":
             self.params = update_n1_n2_n3(self.params)
+            # Update the updated_where dictionary
+            for key in ["n1", "n2", "n3"]:
+                self._update_where_tracking(key, "update_wall_materials")
         # Print information of conversions
         if not self.params["silentMode"]:
             if datatype == "impedance":
@@ -283,6 +359,8 @@ class DEISM:
                 raise ValueError("The parameter type is not supported")
 
     def update_freqs(self):
+        # General information:
+        # With higher RT, the frequency spacing should be smaller
         if self.params["mode"] == "RIR":  # Add 1/T60 as spacing later !!!
             self.params["nSamples"] = int(
                 self.params["sampleRate"] * self.params["RIRLength"]
@@ -297,8 +375,6 @@ class DEISM:
             self.params["freqs"] = np.arange(
                 f_step, self.params["sampleRate"] / 2 + f_step, f_step
             )
-            # remove the first DC frequency
-            self.params["freqs"] = self.params["freqs"]
         elif self.params["mode"] == "RTF":
             self.params["freqs"] = np.arange(
                 self.params["startFreq"],
@@ -308,6 +384,9 @@ class DEISM:
         self.params["waveNumbers"] = (
             2 * np.pi * self.params["freqs"] / self.params["soundSpeed"]
         )  # wavenumbers
+        # Update the updated_where dictionary
+        for key in ["freqs", "waveNumbers"]:
+            self._update_where_tracking(key, "update_freqs")
         # -----------------------------------------------------------
         # Other parameters that depend on the frequencies
         # -----------------------------------------------------------
@@ -320,10 +399,14 @@ class DEISM:
                 * self.params["airDensity"]
                 * self.params["qFlowStrength"]
             )
+            # Update the updated_where dictionary
+            self._update_where_tracking("pointSrcStrength", "update_freqs")
         # -----------------------------------------------------------
         # Interpolate the materials to all frequencies
         # By default, interpolate the impedance only
         self.interpolate_materials(self.params["freqs_bands"], "impedance")
+        # Update the updated_where dictionary
+        self._update_where_tracking("impedance", "interpolate_materials")
         # -----------------------------------------------------------
         # If the room type is convex, initialize the room
         if self.roomtype == "convex":
@@ -332,6 +415,8 @@ class DEISM:
             )  # Lazy import to avoid circular import
 
             self.room_convex = Room_deism_cpp(self.params)
+            # Update the updated_where dictionary
+            self._update_where_tracking("room_convex", "update_directivities")
 
     def update_directivities(self):
         """
@@ -356,7 +441,7 @@ class DEISM:
             self.params = vectorize_C_vu_r(self.params)
         # If use DEISM-ORG or DEISM-MIX, precompute Wigner 3J matrices
         if self.params["DEISM_method"] == "ORG" or self.params["DEISM_method"] == "MIX":
-            self.params["Wigner"] = pre_calc_Wigner(self.params)
+            self.params = pre_calc_Wigner(self.params)
 
     def interpolate_materials(self, freqs_bands, datatype):
         """
@@ -371,6 +456,8 @@ class DEISM:
                 self.params["freqs"],
             )
             self.params["impedance"] = imp_interp
+            # Update the updated_where dictionary
+            self._update_where_tracking("impedance", "interpolate_materials")
         elif datatype == "absorpCoefficient":
             abs_coeff_interp = interpolate_functions(
                 self.params["absorpCoefficient"],
@@ -378,6 +465,8 @@ class DEISM:
                 self.params["freqs"],
             )
             self.params["absorpCoefficient"] = abs_coeff_interp
+            # Update the updated_where dictionary
+            self._update_where_tracking("absorpCoefficient", "interpolate_materials")
         elif datatype == "reverberationTime":
             t60_interp = interpolate_functions(
                 self.params["reverberationTime"],
@@ -385,8 +474,92 @@ class DEISM:
                 self.params["freqs"],
             )
             self.params["reverberationTime"] = t60_interp
+            # Update the updated_where dictionary
+            self._update_where_tracking("reverberationTime", "interpolate_materials")
 
-    def run_DEISM(self):
+    def apply_highpass_filter(
+        self,
+        data: npt.ArrayLike,
+        fs: float,
+        fcut: float = 30.0,
+        zero_phase: bool = True,
+    ) -> npt.ArrayLike:
+        """
+        Apply high-pass filter to the data
+        """
+        return highpass_RIR(data, fs, fcut, zero_phase=zero_phase)
+
+    def create_bandpass_window(
+        self, freqs, f_low, f_high, transition_width_low, transition_width_high
+    ):
+        """
+        Create a smooth bandpass window for frequency-domain filtering.
+
+        The window smoothly tapers to zero at both low and high frequencies,
+        minimizing phase distortion and providing smooth attenuation.
+
+        Parameters:
+        -----------
+        freqs : np.ndarray
+            Frequency array in Hz
+        f_low : float
+            Low-frequency cutoff (high-pass). Frequencies below this are attenuated.
+        f_high : float
+            High-frequency cutoff (low-pass). Frequencies above this are attenuated.
+        transition_width_low : float, optional
+            Transition width for low-frequency taper in Hz. Default: 10% of f_low
+        transition_width_high : float, optional
+            Transition width for high-frequency taper in Hz. Default: 5% of (f_nyquist - f_high)
+
+        Returns:
+        --------
+        window : np.ndarray
+            Window function (0 to 1) with smooth transitions
+            Note: Real-valued window ensures real-valued impulse response when using irfft
+        """
+        f_nyquist = freqs[-1] + (freqs[1] - freqs[0])  # Approximate Nyquist frequency
+
+        # Default transition widths
+        if transition_width_low is None:
+            transition_width_low = max(10.0, 0.1 * f_low)
+        if transition_width_high is None:
+            transition_width_high = max(100.0, 0.05 * (f_nyquist - f_high))
+
+        # Initialize window to 1.0 in passband
+        window = np.ones_like(freqs, dtype=np.float64)
+
+        # Low-frequency taper (high-pass transition)
+        # Smooth cosine taper from 0 to 1 between (f_low - transition_width_low) and f_low
+        low_taper_start = max(0, f_low - transition_width_low)
+        low_taper_mask = (freqs >= low_taper_start) & (freqs < f_low)
+        if np.any(low_taper_mask):
+            taper_range = f_low - low_taper_start
+            if taper_range > 0:
+                normalized = (freqs[low_taper_mask] - low_taper_start) / taper_range
+                # Cosine taper: 0 at low_taper_start, 1 at f_low
+                window[low_taper_mask] = 0.5 * (1 - np.cos(np.pi * normalized))
+
+        # Set frequencies below taper to zero
+        window[freqs < low_taper_start] = 0.0
+
+        # High-frequency taper (low-pass transition)
+        high_taper_start = f_high
+
+        high_taper_end = min(f_nyquist, f_high + transition_width_high)
+        high_taper_mask = (freqs > high_taper_start) & (freqs <= high_taper_end)
+        if np.any(high_taper_mask):
+            taper_range = high_taper_end - high_taper_start
+            if taper_range > 0:
+                # Cosine taper: 1 at high_taper_start, 0 at high_taper_end
+                normalized = (freqs[high_taper_mask] - high_taper_start) / taper_range
+                window[high_taper_mask] = 0.5 * (1 + np.cos(np.pi * normalized))
+
+        # Set frequencies above taper to zero
+        window[freqs > high_taper_end] = 0.0
+
+        return window
+
+    def run_DEISM(self, if_clean_up: bool = True):
         """
         Run DEISM
         """
@@ -396,42 +569,140 @@ class DEISM:
             ray.init(num_cpus=num_cpus)
             print("\n")
         if self.roomtype == "shoebox":
-            pressure = run_DEISM(self.params)
+            self.params["RTF"] = run_DEISM(self.params)
         elif self.roomtype == "convex":
-            pressure = run_DEISM_ARG(self.params)
+            self.params["RTF"] = run_DEISM_ARG(self.params)
         # Shutdown Ray
         ray.shutdown()
+        # Clean up large matrices in self.params, e.g., params["images"]
+        if if_clean_up:
+            import gc
+
+            # Delete the images dictionary (and all its contents)
+            # Note: In CPython, del dict[key] immediately decrements reference counts
+            # of all values, so deleting contents first is not necessary, but we do it
+            # for explicitness and to ensure memory is freed even if there are edge cases
+            if "images" in self.params:
+                del self.params["images"]
+            # Force garbage collection to free memory immediately
+            gc.collect()
         # -------------------------------------------------------
-        # Save the results to local directory with .npz format
-        save_path = f"./outputs/{self.mode}s"
-        # check if the save path exists
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
+        # # Save the results to local directory with .npz format
+        # save_path = f"./outputs/{self.mode}s"
+        # # check if the save path exists
+        # if not os.path.exists(save_path):
+        #     os.makedirs(save_path)
         # Save the results along with all the parameters to a .npz file with file name as the current time
+        # if self.mode == "RIR":
+        #     data = convert_RTF_to_RIR(
+        #         self.params["RTF"],
+        #         self.params,
+        #     )
+        # elif self.mode == "RTF":
+        #     data = self.params["RTF"]
+        # return data
+
+    def print_tracking_summary(self):
+        """
+        Print the tracking summary
+        """
+        print(self.params["updated_where"])
+
+    def get_results(
+        self,
+        highpass_filter: bool = False,
+        bandpass_window: bool = True,
+        cut_freq: float = 30.0,
+        zero_phase: bool = True,
+    ):
+        """
+        Convert RTF to RIR
+        """
+        # For the highpass filter or bandpass, only one of them can be True
+        if highpass_filter and bandpass_window:
+            raise ValueError(
+                "Only one of highpass_filter or bandpass_window can be True"
+            )
         if self.mode == "RIR":
-            data = convert_RTF_to_RIR(pressure, self.params)
+            dt = 1 / self.params["sampleRate"]
+            # Align time array with frequency spacing to avoid periodicity artifacts
+            # The frequency spacing f_step determines the period T_period = 1/f_step
+            # The time array length must be an integer multiple of this period
+            if len(self.params["freqs"]) > 1:
+                # Get the actual frequency spacing used in update_freqs
+                f_step = self.params["freqs"][1] - self.params["freqs"][0]
+                T_period = 1 / f_step  # Period determined by frequency spacing
+
+                # Calculate number of samples for one period
+                N_period = int(np.round(T_period * self.params["sampleRate"]))
+
+                # Calculate samples needed for RT60
+                N_rt60 = int(
+                    np.round(
+                        self.params["reverberationTime"] * self.params["sampleRate"]
+                    )
+                )
+
+                # Use an integer multiple of the period, ensuring we capture at least RT60
+                # If RT60 is less than one period, use one period
+                # Otherwise, use multiple periods to ensure we capture at least RT60
+                if N_rt60 <= N_period:
+                    # Use one period (which is approximately RT60)
+                    N_samples = N_period
+                else:
+                    # Use multiple periods to ensure we capture at least RT60
+                    n_periods = int(np.ceil(N_rt60 / N_period))
+                    N_samples = n_periods * N_period
+            else:
+                # Fallback if frequency array is too short
+                N_samples = (
+                    int(
+                        np.round(
+                            self.params["reverberationTime"] * self.params["sampleRate"]
+                        )
+                    )
+                    + 1
+                )
+
+            # Create time array with correct length (aligned with period)
+            t = np.arange(0, N_samples) * dt
+
+            # Parameters for bandpass window
+            f_low = 150
+            f_high = int(self.params["sampleRate"] / 2 * 0.7)
+            transition_width_low = int(f_low * 0.3)
+            transition_width_high = int(f_high * 0.15)
+
+            if bandpass_window:
+                window = self.create_bandpass_window(
+                    self.params["freqs"],
+                    f_low,
+                    f_high,
+                    transition_width_low,
+                    transition_width_high,
+                )
+                self.params["RTF"] = self.params["RTF"] * window
+            # Construct frequency domain (DC + positive frequencies)
+            full_P = np.concatenate([[0], self.params["RTF"]])
+            # Use irfft for real-valued signals (handles Hermitian symmetry correctly)
+            # n must match the time array length
+            p = np.fft.irfft(full_P, n=N_samples)
+
+            if highpass_filter:
+                p = self.apply_highpass_filter(
+                    p, self.params["sampleRate"], cut_freq, zero_phase
+                )
+            p = p / np.max(np.abs(p))
+            # Adjust rir length using the RIRLength parameter (truncate after IFFT)
+            nSamples = int(self.params["RIRLength"] * self.params["sampleRate"])
+            if len(p) < nSamples:
+                p = np.concatenate([p, np.zeros(nSamples - len(p))])
+            elif len(p) > nSamples:
+                p = p[:nSamples]
         elif self.mode == "RTF":
-            data = pressure
-        return data
+            p = self.params["RTF"]
 
-
-def convert_RTF_to_RIR(P, params):
-    """
-    Convert RTF to RIR
-    """
-    dt = 1 / params["sampleRate"]
-    t = np.arange(0, params["reverberationTime"] + dt, dt)
-    full_P = np.concatenate([[0], P])
-    p = np.real(ifft(full_P, n=len(t)))
-    p = p / np.max(np.abs(p))
-    # Adjust rir length using the RIRLength parameter
-    nSamples = params["RIRLength"] * params["sampleRate"]
-    if len(p) < nSamples:
-        p = np.concatenate([p, np.zeros(nSamples - len(p))])
-    elif len(p) > nSamples:
-        p = p[:nSamples]
-
-    return p
+        return p
 
 
 def convert_imp_abs_t60_convex(room=None, datain=None, params_type=None):
@@ -477,15 +748,15 @@ def convert_imp_abs_t60_shoebox(Volumn, Areas, c, datain, params_type):
     - Areas: numpy array of length 6, ordered as [x1, x2, y1, y2, z1, z2]
     - c: float, the speed of sound
     - datain:
-    1. impedance: numpy array of size 6 * len(frequency bands)
+    1. impedance: numpy array of size (6, len(frequency bands))
     2. absorption coefficients: numpy array of size 6 * len(frequency bands)
-    3. reverberation time: float output, take the max value
+    3. reverberation time: float
     - params_type: str, the type of the parameters to be converted
     1. "impedance": impedance
     2. "absorpCoefficient": absorption coefficients
     3. "reverberationTime": reverberation time
     Outputs:
-    - impedance: numpy array of size 6 * len(frequency bands)
+    - impedance: numpy array of size (6, len(frequency bands))
     - absorption coefficients: numpy array of size 6 * len(frequency bands)
     - reverberation time: float or numpy array of size len(frequency bands)
     """
@@ -498,11 +769,15 @@ def convert_imp_abs_t60_shoebox(Volumn, Areas, c, datain, params_type):
         abs_coeff = datain
         imp = convert_abs_to_imp(abs_coeff)
         t60 = convert_imp_to_t60(Volumn, Areas, c, imp)
-    # TODO: add other cases
-    # elif params_type == "reverberationTime":
-    #     t60 = datain
-    #     imp = convert_t60_to_imp(Volumn, Areas, c, t60)
-    #     abs_coeff = convert_imp_to_abs(imp)
+    elif params_type == "reverberationTime":
+        t60 = datain
+        imp = convert_t60_to_imp(Volumn, Areas, c, t60)
+        abs_coeff = convert_imp_to_abs(imp)
+        # If T60 is a float number, the imp and abs_coeff is float now,
+        # Convert it to arrays of size (6,1)
+        imp = np.full((6, 1), imp)
+        abs_coeff = np.full((6, 1), abs_coeff)
+
     else:
         raise ValueError("The parameter type is not supported")
 
@@ -513,9 +788,9 @@ def convert_abs_to_imp(abs_coeff):
     """
     Estimate impedance from absorption coefficients
     Inputs:
-    - abs_coeff: numpy array of size 6 * len(frequency bands) or scalar
+    - abs_coeff: numpy array of size (6, len(frequency bands)) or scalar
     Outputs:
-    - imp: real part of the impedance, numpy array of size 6 * len(frequency bands) or scalar
+    - imp: real part of the impedance, numpy array of size (6, len(frequency bands)) or scalar
     """
     # Handle scalar input
     if np.isscalar(abs_coeff):
@@ -528,7 +803,7 @@ def convert_abs_to_imp(abs_coeff):
         abs_coeff = abs_coeff.reshape(-1, 1)
 
     # Initialize output array with same shape
-    imp = np.zeros_like(abs_coeff)
+    imp = np.zeros_like(abs_coeff, dtype=complex)
 
     # Process each element
     for i in range(abs_coeff.shape[0]):
@@ -567,7 +842,7 @@ def _convert_abs_to_imp_scalar(abs_coeff_scalar):
     else:
         z_r = result.x[0]
 
-    return z_r
+    return z_r + 1e-16j
 
 
 def get_imp_abs(z, abs_coeff):
@@ -618,6 +893,102 @@ def _get_imp_abs_scalar(z_scalar, aran_scalar):
         return 1e6
 
     result = np.abs(aran_scalar - aest) / aran_scalar * 100
+
+    return result
+
+
+def convert_t60_to_imp(Volumn, Areas, c, t60):
+    """
+    Estimate impedance from reverberation time (T60)
+    Inputs:
+    - t60: numpy array of size (len(frequency bands),) or scalar, reverberation time
+    - Volumn: float, room volume
+    - Areas: numpy array of size (6,), areas of the six walls
+    - c: float, speed of sound
+    Outputs:
+    - imp: real part of the impedance, numpy array of size (6, len(frequency bands))
+    """
+    # Handle scalar input
+    if np.isscalar(t60):
+        return _convert_t60_to_imp_scalar(Volumn, Areas, c, t60)
+
+    # Handle array input
+    t60 = np.asarray(t60)
+    if t60.ndim == 0:  # scalar array
+        return _convert_t60_to_imp_scalar(Volumn, Areas, c, float(t60))
+
+    # Initialize output array with same shape
+    imp = np.zeros((6, t60.shape[0]), dtype=complex)
+
+    # Process each element
+    for i in range(t60.shape[0]):
+        imp[:, i] = _convert_t60_to_imp_scalar(Volumn, Areas, c, t60[i])
+
+    return imp
+
+
+def _convert_t60_to_imp_scalar(Volumn, Areas, c, t60_scalar):
+    """
+    Convert a single T60 value to impedance
+    """
+    # Calculate total surface area
+    S = np.sum(Areas)
+
+    def objective(z_r):
+        return estimate_imp_t60(z_r, t60_scalar, Volumn, S, c)
+
+    # Try different initial guesses if the first one fails
+    initial_guesses = [10, 5, 20, 1.5]
+    result = None
+
+    for x0 in initial_guesses:
+        try:
+            result = least_squares(objective, x0=x0, bounds=(1, 1e3))
+            if result.success:
+                break
+        except (ValueError, RuntimeError):
+            continue
+
+    if result is None or not result.success:
+        # Fallback: use a simple grid search
+        z_values = np.linspace(1, 1000, 1000)
+        errors = [objective(z) for z in z_values]
+        best_idx = np.argmin(errors)
+        z_r = z_values[best_idx]
+    else:
+        z_r = result.x[0]
+
+    return z_r + 1e-16j
+
+
+def estimate_imp_t60(z, ref, V, S, c):
+    """
+    Calculate T60 difference for optimization
+    Inputs:
+    - z: impedance value to test
+    - ref: reference T60 value
+    - V: room volume
+    - S: total surface area
+    - c: speed of sound
+    Outputs:
+    - result: percentage error between reference and calculated T60
+    """
+    b = 1 / z
+
+    # Handle the complex logarithm properly
+    ratio1 = (1 + b) / (1 - b)
+    ratio2 = (b + 1) / (b - 1)
+
+    # Use absolute values for the logarithms to avoid complex results
+    d = np.log(np.abs(ratio1) ** 2) + 2 * np.real(b * (2 - b * np.log(np.abs(ratio2))))
+
+    # Check if d is valid
+    if not np.isfinite(d) or d <= 0:
+        # Return a large penalty value instead of non-finite
+        return 1e6
+
+    est = 24 * np.log(10) * V / c / S / d
+    result = np.abs(ref - est) / ref * 100
 
     return result
 
@@ -701,7 +1072,17 @@ def interpolate_functions(datain, sparse_freqs, dense_freqs):
         raise ValueError(
             "The last dimension of datain is not the same as the length of sparse_freqs"
         )
-    # perform interpolation
+
+    # Handle the case where there is only one frequency point (no interpolation needed)
+    if len(sparse_freqs) < 2:
+        # Broadcast the single value to all dense frequencies
+        # datain has shape (..., 1), we need to broadcast to (..., len(dense_freqs))
+        # Using np.tile or np.broadcast_to to repeat the last dimension
+        expanded_shape = datain.shape[:-1] + (len(dense_freqs),)
+        result = np.broadcast_to(datain, expanded_shape).copy()
+        return result
+
+    # perform interpolation when there are at least 2 frequency points
     real_interp_func = PchipInterpolator(
         sparse_freqs, datain.real, axis=-1, extrapolate=True
     )
@@ -729,7 +1110,12 @@ def vectorize_C_nm_s(params):
             C_nm_s_vec[:, n**2 + n + m] = params["C_nm_s"][:, n, m]
     params["n_all"] = n_all
     params["m_all"] = m_all
-    params["C_nm_s_vec"] = C_nm_s_vec
+    params["C_nm_s_vec"] = C_nm_s_vec.astype(np.complex64)
+    # Update the updated_where dictionary
+    if params["track_updated_where"]:
+        params["updated_where"]["C_nm_s_vec"] = ["vectorize_C_nm_s"]
+        params["updated_where"]["n_all"] = ["vectorize_C_nm_s"]
+        params["updated_where"]["m_all"] = ["vectorize_C_nm_s"]
     return params
 
 
@@ -751,7 +1137,12 @@ def vectorize_C_nm_s_ARG(params):
     # Add the vectorized coefficients to the params dictionary
     params["n_all"] = n_all
     params["m_all"] = m_all
-    params["C_nm_s_ARG_vec"] = C_nm_s_vec
+    params["C_nm_s_ARG_vec"] = C_nm_s_vec.astype(np.complex64)
+    # Update the updated_where dictionary if track_updated_where is True
+    if params["track_updated_where"]:
+        params["updated_where"]["C_nm_s_ARG_vec"] = ["vectorize_C_nm_s_ARG"]
+        params["updated_where"]["n_all"] = ["vectorize_C_nm_s_ARG"]
+        params["updated_where"]["m_all"] = ["vectorize_C_nm_s_ARG"]
     return params
 
 
@@ -771,7 +1162,12 @@ def vectorize_C_vu_r(params):
             C_vu_r_vec[:, v**2 + v + u] = params["C_vu_r"][:, v, u]
     params["v_all"] = v_all
     params["u_all"] = u_all
-    params["C_vu_r_vec"] = C_vu_r_vec
+    params["C_vu_r_vec"] = C_vu_r_vec.astype(np.complex64)
+    # Update the updated_where dictionary if track_updated_where is True
+    if params["track_updated_where"]:
+        params["updated_where"]["C_vu_r_vec"] = ["vectorize_C_vu_r"]
+        params["updated_where"]["v_all"] = ["vectorize_C_vu_r"]
+        params["updated_where"]["u_all"] = ["vectorize_C_vu_r"]
     return params
 
 
@@ -788,8 +1184,12 @@ def init_source_directivities(params):
         k = params["waveNumbers"]
         # Calculate source directivity coefficients C_nm^s
         C_nm_s = -1j * k * scy.spherical_jn(0, 0) * np.conj(scy.sph_harm(0, 0, 0, 0))
-        params["C_nm_s"] = C_nm_s[..., None, None]
+        params["C_nm_s"] = C_nm_s[..., None, None].astype(np.complex64)
         params["sourceOrder"] = 0
+        # Update the updated_where dictionary if track_updated_where is True
+        if params["track_updated_where"]:
+            params["updated_where"]["C_nm_s"] = ["init_source_directivities"]
+            params["updated_where"]["sourceOrder"] = ["init_source_directivities"]
     else:  # If not simple source directivities are used, load the directivity data
         # ------------- Load simulation data -------------
         freqs, Psh_source, Dir_all_source, r0_source = load_directive_pressure(
@@ -831,7 +1231,10 @@ def init_source_directivities(params):
             Pmnr0_source,
             params["radiusSource"],
         )
-        params["C_nm_s"] = C_nm_s
+        params["C_nm_s"] = C_nm_s.astype(np.complex64)
+        # Update the updated_where dictionary if track_updated_where is True
+        if params["track_updated_where"]:
+            params["updated_where"]["C_nm_s"] = ["init_source_directivities"]
     # end = time.perf_counter()
     if not params["silentMode"]:
         # minutes, seconds = divmod(end - start, 60)
@@ -851,9 +1254,16 @@ def init_receiver_directivities(params):
         k = params["waveNumbers"]
         # Calculate receiver directivity coefficients C_vu^r
         C_vu_r = -1j * k * scy.spherical_jn(0, 0) * np.conj(scy.sph_harm(0, 0, 0, 0))
-        params["C_vu_r"] = C_vu_r[..., None, None]
+        params["C_vu_r"] = C_vu_r[..., None, None].astype(np.complex64)
         params["receiverOrder"] = 0
         params["ifReceiverNormalize"] = 0
+        # Update the updated_where dictionary if track_updated_where is True
+        if params["track_updated_where"]:
+            params["updated_where"]["C_vu_r"] = ["init_receiver_directivities"]
+            params["updated_where"]["receiverOrder"] = ["init_receiver_directivities"]
+            params["updated_where"]["ifReceiverNormalize"] = [
+                "init_receiver_directivities"
+            ]
     else:  # If not simple source directivities are used, load the directivity data
         # ------------- Load simulation data -------------
         freqs, Psh_receiver, Dir_all_receiver, r0_receiver = load_directive_pressure(
@@ -904,7 +1314,10 @@ def init_receiver_directivities(params):
             Pmnr0_receiver,
             params["radiusReceiver"],
         )
-        params["C_vu_r"] = C_vu_r
+        params["C_vu_r"] = C_vu_r.astype(np.complex64)
+        # Update the updated_where dictionary if track_updated_where is True
+        if params["track_updated_where"]:
+            params["updated_where"]["C_vu_r"] = ["init_receiver_directivities"]
     if not params["silentMode"]:
         print(" Done!", end="\n\n")
     return params
@@ -1142,10 +1555,18 @@ def init_source_directivities_ARG(params):
         C_nm_s = -1j * k * scy.spherical_jn(0, 0) * np.conj(scy.sph_harm(0, 0, 0, 0))
         # Duplicate the directivity coefficients for each image source by adding a fourth dimension
         # We can do this by multiplying the directivity coefficients with a 1x1x1xN_images array
-        params["C_nm_s_ARG"] = C_nm_s[..., None, None, None] * np.ones(  # noqa: E203
+        params["C_nm_s_ARG"] = C_nm_s[..., None, None, None].astype(
+            np.complex64
+        ) * np.ones(  # noqa: E203
             (1, 1, 1, reflection_matrix.shape[2])
+        ).astype(
+            np.complex64
         )
         params["sourceOrder"] = 0
+        # Update the updated_where dictionary
+        if params["track_updated_where"]:
+            params["updated_where"]["C_nm_s_ARG"] = ["init_source_directivities"]
+            params["updated_where"]["sourceOrder"] = ["init_source_directivities"]
     else:  # If not simple source directivities are used, load the directivity data
         # load directivities
         freqs, Psh_source, Dir_all_source, r0_source = load_directive_pressure(
@@ -1213,7 +1634,10 @@ def init_source_directivities_ARG(params):
             rotated_coords_src,
             params,
         )
-        params["C_nm_s_ARG"] = C_nm_s_ARG
+        params["C_nm_s_ARG"] = C_nm_s_ARG.astype(np.complex64)
+        # Update the updated_where dictionary if track_updated_where is True
+        if params["track_updated_where"]:
+            params["updated_where"]["C_nm_s_ARG"] = ["init_source_directivities"]
     if not params["silentMode"]:
         print(" Done!", end="\n\n")
     return params
@@ -1238,9 +1662,16 @@ def init_receiver_directivities_ARG(params):
         k = params["waveNumbers"]
         # Calculate receiver directivity coefficients C_vu^r
         C_vu_r = -1j * k * scy.spherical_jn(0, 0) * np.conj(scy.sph_harm(0, 0, 0, 0))
-        params["C_vu_r"] = C_vu_r[..., None, None]
+        params["C_vu_r"] = C_vu_r[..., None, None].astype(np.complex64)
         params["receiverOrder"] = 0
         params["ifReceiverNormalize"] = 0
+        # Update the updated_where dictionary
+        if params["track_updated_where"]:
+            params["updated_where"]["C_vu_r"] = ["init_receiver_directivities"]
+            params["updated_where"]["receiverOrder"] = ["init_receiver_directivities"]
+            params["updated_where"]["ifReceiverNormalize"] = [
+                "init_receiver_directivities"
+            ]
     else:  # If not simple source directivities are used, load the directivity data
         freqs, Psh_receiver, Dir_all_receiver, r0_receiver = load_directive_pressure(
             params["silentMode"], "receiver", params["receiverType"]
@@ -1325,7 +1756,10 @@ def init_receiver_directivities_ARG(params):
             Pmnr0_receiver,
             params["radiusReceiver"],
         )
-        params["C_vu_r"] = C_vu_r
+        params["C_vu_r"] = C_vu_r.astype(np.complex64)
+        # Update the updated_where dictionary
+        if params["track_updated_where"]:
+            params["updated_where"]["C_vu_r"] = ["init_receiver_directivities"]
         if not params["silentMode"]:
             print(" Done!", end="\n\n")
     return params
@@ -1394,14 +1828,18 @@ def pre_calc_Wigner(params, timeit=True):
                             W_2_all[n, v, l, m, u] = np.array([W_2], dtype=float)
 
     Wigner = {
-        "W_1_all": W_1_all,
-        "W_2_all": W_2_all,
+        "W_1_all": W_1_all.astype(np.complex64),
+        "W_2_all": W_2_all.astype(np.complex64),
     }
     end = time.perf_counter()
     minutes, seconds = divmod(end - start, 60)
     if not params["silentMode"]:
         print(f"Done! [{minutes} minutes, {seconds:.1f} seconds]", end="\n\n")
-    return Wigner
+    params["Wigner"] = Wigner
+    # Update the updated_where dictionary if track_updated_where is True
+    if params["track_updated_where"]:
+        params["updated_where"]["Wigner"] = ["pre_calc_Wigner"]
+    return params
 
 
 # -------------------------------
@@ -1639,6 +2077,108 @@ def pre_calc_images_src_rec_original_nofs(params):
     return images
 
 
+def get_reflection_path_shoebox_test(order, room_dims, c, T60):
+    """
+    Optimized version for fixed positions: source at (0,0,0) and receiver at (room_dims).
+
+    This function will use the C++ implementation if available (much faster),
+    otherwise falls back to Python implementation.
+
+    Key optimizations:
+    1. Source at (0,0,0) means source_offset is always 0 - eliminated
+    2. Distance calculation simplified: I_s = [2*q_x*Lx, 2*q_y*Ly, 2*q_z*Lz]
+       Distance^2 = Lx^2*(2*q_x-1)^2 + Ly^2*(2*q_y-1)^2 + Lz^2*(2*q_z-1)^2
+    3. Pre-compute squared room dimensions and max_distance_squared
+    4. Use squared distance (no sqrt)
+    5. Pre-filter valid sign combinations
+    6. Avoid numpy array creation
+    """
+    # Use C++ version if available (much faster)
+    if CPP_COUNTING_AVAILABLE:
+        try:
+            count = count_reflections_cpp(order, room_dims, c, T60)
+            return count
+        except (RuntimeError, OSError):
+            # C++ library not available or failed, fall back to Python
+            pass
+
+    # Python fallback
+    count = 0
+
+    # Pre-compute constants
+    room_dims = np.asarray(room_dims, dtype=np.float64)
+    max_distance_squared = (c * T60) ** 2  # Use squared distance to avoid sqrt
+
+    # Pre-compute squared room dimensions for distance calculation
+    # Since receiver is at [room_dims[0], room_dims[1], room_dims[2]]
+    # and I_s = [2*q_x*room_dims[0], 2*q_y*room_dims[1], 2*q_z*room_dims[2]]
+    # distance^2 = (2*q_x - 1)^2 * room_dims[0]^2 + (2*q_y - 1)^2 * room_dims[1]^2 + (2*q_z - 1)^2 * room_dims[2]^2
+    room_dims_sq = room_dims**2
+
+    for p_x in range(2):
+        for p_y in range(2):
+            for p_z in range(2):
+                # For each (p_x, p_y, p_z), generate all (q_x, q_y, q_z) that give valid reflection orders
+                for ref_order in range(order + 1):
+                    # Generate all combinations (i, j, k) such that |i| + |j| + |k| = ref_order
+                    # where i = 2*q_x - p_x, j = 2*q_y - p_y, k = 2*q_z - p_z
+
+                    for i_abs in range(ref_order + 1):
+                        for j_abs in range(ref_order - i_abs + 1):
+                            k_abs = ref_order - i_abs - j_abs
+
+                            # Generate all sign combinations for i, j, k
+                            i_values = [i_abs] if i_abs == 0 else [-i_abs, i_abs]
+                            j_values = [j_abs] if j_abs == 0 else [-j_abs, j_abs]
+                            k_values = [k_abs] if k_abs == 0 else [-k_abs, k_abs]
+
+                            for i in i_values:
+                                for j in j_values:
+                                    for k in k_values:
+                                        if (
+                                            (i + p_x) % 2 == 0
+                                            and (j + p_y) % 2 == 0
+                                            and (k + p_z) % 2 == 0
+                                        ):
+                                            q_x = (i + p_x) // 2
+                                            q_y = (j + p_y) // 2
+                                            q_z = (k + p_z) // 2
+
+                                            # Distance calculation optimized for fixed positions
+                                            # receiver is at [room_dims[0], room_dims[1], room_dims[2]]
+                                            # So: dx = I_s_x - rx = 2*q_x*room_dims[0] - room_dims[0] = room_dims[0]*(2*q_x - 1)
+                                            # dist^2 = room_dims[0]^2*(2*q_x-1)^2 + room_dims[1]^2*(2*q_y-1)^2 + room_dims[2]^2*(2*q_z-1)^2
+                                            dx_factor = 2 * q_x - 1
+                                            dy_factor = 2 * q_y - 1
+                                            dz_factor = 2 * q_z - 1
+
+                                            dist_squared = (
+                                                room_dims_sq[0] * dx_factor * dx_factor
+                                                + room_dims_sq[1]
+                                                * dy_factor
+                                                * dy_factor
+                                                + room_dims_sq[2]
+                                                * dz_factor
+                                                * dz_factor
+                                            )
+
+                                            # Check if within maximum distance
+                                            if dist_squared < max_distance_squared:
+                                                count += 1
+    return count
+
+
+def get_reflection_path_number_from_order(order, surfaceNumber):
+    """Get the number of reflection paths from the order, not including the direct path"""
+    count = 0
+    if order >= 1:
+        for i in range(1, order + 1):
+            count += surfaceNumber * (surfaceNumber - 1) ** (i - 1)
+        return count
+    else:
+        return 0
+
+
 def pre_calc_images_src_rec_optimized_nofs(params):
     """
     Optimized version: Calculate images, reflection paths, and attenuation due to reflections
@@ -1649,48 +2189,75 @@ def pre_calc_images_src_rec_optimized_nofs(params):
         print("[Calculating] Images and attenuations (OPTIMIZED), ", end="")
     start = time.perf_counter()
 
-    LL = params["roomSize"]
-    x_r = params["posReceiver"]
-    x_s = params["posSource"]
-    RefCoef_angdep_flag = params["angDepFlag"]
+    LL = np.asarray(params["roomSize"], dtype=np.float64)
+    x_r = np.asarray(params["posReceiver"], dtype=np.float64)
+    x_s = np.asarray(params["posSource"], dtype=np.float64)
+    max_distance_squared = (params["soundSpeed"] * params["reverberationTime"]) ** 2
+    RefCoef_angdep_flag = int(params["angDepFlag"])
 
     if RefCoef_angdep_flag == 1:
         print("using angle-dependent reflection coefficients, ", end="")
 
     N_o = params["maxReflOrder"]
     Z_S = params["impedance"]
-    c = params["soundSpeed"]
+    c = np.float32(params["soundSpeed"])
     T60 = params["reverberationTime"]
     N_o_ORG = params["mixEarlyOrder"]
 
     if N_o < N_o_ORG:
         N_o_ORG = N_o
 
+    num_ref_paths_shoebox = get_reflection_path_shoebox_test(N_o, LL, c, T60)
+    # print how long it takes to get the number of reflection paths if not silent mode
+    if not params["silentMode"]:
+        if CPP_COUNTING_AVAILABLE:
+            print(
+                f"Time taken to get the number of reflection paths (C++): {time.perf_counter() - start} seconds"
+            )
+        else:
+            print(
+                f"Time taken to get the number of reflection paths (Python): {time.perf_counter() - start} seconds"
+            )
     # Storage for early and late reflections
-    R_sI_r_all_early = []
-    R_s_rI_all_early = []
-    R_r_sI_all_early = []
-    atten_all_early = []
-    A_early = []
-
-    R_sI_r_all_late = []
-    R_s_rI_all_late = []
-    R_r_sI_all_late = []
-    atten_all_late = []
-    A_late = []
-
+    num_early_ref_paths_estimate = get_reflection_path_number_from_order(N_o_ORG, 6) + 1
+    # Add safety margin (50%) to account for potential miscounts
+    num_early_ref_paths = int(num_early_ref_paths_estimate * 1.1)
+    # Use total count as an upper bound, then truncate after filling
+    # Allocate enough space for early reflections
+    R_sI_r_all_early = np.zeros((num_early_ref_paths, 3))
+    R_s_rI_all_early = R_sI_r_all_early.copy()
+    R_r_sI_all_early = R_sI_r_all_early.copy()
+    # Attenuation should have frequency dependence
+    numFreqs = Z_S.shape[1]
+    atten_all_early = np.zeros((num_early_ref_paths, numFreqs), dtype=np.complex128)
+    A_early = np.zeros((num_early_ref_paths, 6), dtype=np.int32)
+    early_idx = 0
+    # Late reflections: use total count minus original early count as estimate
+    # Add safety margin, we'll truncate to actual size after filling
+    num_late_ref_paths = max(
+        int((num_ref_paths_shoebox - num_early_ref_paths_estimate) * 1.1),
+        1000,
+    )
+    R_sI_r_all_late = np.zeros((num_late_ref_paths, 3))
+    R_s_rI_all_late = R_sI_r_all_late.copy()
+    R_r_sI_all_late = R_sI_r_all_late.copy()
+    atten_all_late = np.zeros((num_late_ref_paths, numFreqs), dtype=np.complex128)
+    A_late = np.zeros((num_late_ref_paths, 6), dtype=np.int32)
+    late_idx = 0
     # Other variables
     room_c = LL / 2
     x_r_room_c = x_r - room_c
     v_rec = np.array([x_r_room_c[0], x_r_room_c[1], x_r_room_c[2], 1])
 
     print(f"maxReflectionOrder: {N_o}")
-    # count = 0
 
     # Optimized approach: directly generate combinations that satisfy reflection order constraint
     for p_x in range(2):
+        source_offset_x = x_s[0] - 2 * p_x * x_s[0]
         for p_y in range(2):
+            source_offset_y = x_s[1] - 2 * p_y * x_s[1]
             for p_z in range(2):
+                source_offset_z = x_s[2] - 2 * p_z * x_s[2]
                 # For each (p_x, p_y, p_z), generate all (q_x, q_y, q_z) that give valid reflection orders
                 for ref_order in range(N_o + 1):
                     # Generate all combinations (i, j, k) such that |i| + |j| + |k| = ref_order
@@ -1727,32 +2294,21 @@ def pre_calc_images_src_rec_optimized_nofs(params):
                                                 abs(i) + abs(j) + abs(k)
                                             )
                                             assert calculated_ref_order == ref_order
-
-                                            # count += 1
-
-                                            # All the original calculations remain the same
-                                            R_q = np.array(
-                                                [
-                                                    2 * q_x * LL[0],
-                                                    2 * q_y * LL[1],
-                                                    2 * q_z * LL[2],
-                                                ]
-                                            )
-
                                             # Source images
-                                            R_p_s = np.array(
+                                            I_s = np.array(
                                                 [
-                                                    x_s[0] - 2 * p_x * x_s[0],
-                                                    x_s[1] - 2 * p_y * x_s[1],
-                                                    x_s[2] - 2 * p_z * x_s[2],
-                                                ]
+                                                    2 * q_x * LL[0] + source_offset_x,
+                                                    2 * q_y * LL[1] + source_offset_y,
+                                                    2 * q_z * LL[2] + source_offset_z,
+                                                ],
                                             )
-                                            I_s = R_p_s + R_q
+                                            dist_squared = (
+                                                (I_s[0] - x_r[0]) ** 2
+                                                + (I_s[1] - x_r[1]) ** 2
+                                                + (I_s[2] - x_r[2]) ** 2
+                                            )
                                             # The following codes are only calculated if the distance from image to receiver is no larger than c * T60
-                                            if (
-                                                np.linalg.norm(I_s - x_r) - (c * T60)
-                                                > 0
-                                            ):
+                                            if dist_squared > max_distance_squared:
                                                 continue
 
                                             # Receiver images
@@ -1848,7 +2404,6 @@ def pre_calc_images_src_rec_optimized_nofs(params):
                                                 beta_y2 = ref_coef(0, Z_S[3, :])
                                                 beta_z1 = ref_coef(0, Z_S[4, :])
                                                 beta_z2 = ref_coef(0, Z_S[5, :])
-
                                             atten = (
                                                 beta_x1 ** np.abs(q_x - p_x)
                                                 * beta_x2 ** np.abs(q_x)
@@ -1859,48 +2414,81 @@ def pre_calc_images_src_rec_optimized_nofs(params):
                                             )
 
                                             if ref_order <= N_o_ORG:
-                                                A_early.append(
-                                                    [q_x, q_y, q_z, p_x, p_y, p_z]
-                                                )
-                                                R_sI_r_all_early.append(
-                                                    [phi_R_sI_r, theta_R_sI_r, r_R_sI_r]
-                                                )
-                                                R_s_rI_all_early.append(
-                                                    [phi_R_s_rI, theta_R_s_rI, r_R_s_rI]
-                                                )
-                                                R_r_sI_all_early.append(
-                                                    [phi_R_r_sI, theta_R_r_sI, r_R_r_sI]
-                                                )
-                                                atten_all_early.append(atten)
+                                                A_early[early_idx, :] = [
+                                                    q_x,
+                                                    q_y,
+                                                    q_z,
+                                                    p_x,
+                                                    p_y,
+                                                    p_z,
+                                                ]
+                                                R_sI_r_all_early[early_idx, :] = [
+                                                    phi_R_sI_r,
+                                                    theta_R_sI_r,
+                                                    r_R_sI_r,
+                                                ]
+                                                R_s_rI_all_early[early_idx, :] = [
+                                                    phi_R_s_rI,
+                                                    theta_R_s_rI,
+                                                    r_R_s_rI,
+                                                ]
+                                                R_r_sI_all_early[early_idx, :] = [
+                                                    phi_R_r_sI,
+                                                    theta_R_r_sI,
+                                                    r_R_r_sI,
+                                                ]
+                                                atten_all_early[early_idx, :] = atten
+                                                early_idx += 1
                                             else:
-                                                A_late.append(
-                                                    [q_x, q_y, q_z, p_x, p_y, p_z]
-                                                )
-                                                R_sI_r_all_late.append(
-                                                    [phi_R_sI_r, theta_R_sI_r, r_R_sI_r]
-                                                )
-                                                R_s_rI_all_late.append(
-                                                    [phi_R_s_rI, theta_R_s_rI, r_R_s_rI]
-                                                )
-                                                R_r_sI_all_late.append(
-                                                    [phi_R_r_sI, theta_R_r_sI, r_R_r_sI]
-                                                )
-                                                atten_all_late.append(atten)
+                                                A_late[late_idx, :] = [
+                                                    q_x,
+                                                    q_y,
+                                                    q_z,
+                                                    p_x,
+                                                    p_y,
+                                                    p_z,
+                                                ]
+                                                R_sI_r_all_late[late_idx, :] = [
+                                                    phi_R_sI_r,
+                                                    theta_R_sI_r,
+                                                    r_R_sI_r,
+                                                ]
+                                                R_s_rI_all_late[late_idx, :] = [
+                                                    phi_R_s_rI,
+                                                    theta_R_s_rI,
+                                                    r_R_s_rI,
+                                                ]
+                                                R_r_sI_all_late[late_idx, :] = [
+                                                    phi_R_r_sI,
+                                                    theta_R_r_sI,
+                                                    r_R_r_sI,
+                                                ]
+                                                atten_all_late[late_idx, :] = atten
+                                                late_idx += 1
 
-    # print(f"Total number of reflections: {count}")
+    # Truncate arrays to actual size used
+    R_sI_r_all_early = R_sI_r_all_early[:early_idx, :]
+    R_s_rI_all_early = R_s_rI_all_early[:early_idx, :]
+    R_r_sI_all_early = R_r_sI_all_early[:early_idx, :]
+    atten_all_early = atten_all_early[:early_idx, :]
+    A_early = A_early[:early_idx, :]
+
+    R_sI_r_all_late = R_sI_r_all_late[:late_idx, :]
+    R_s_rI_all_late = R_s_rI_all_late[:late_idx, :]
+    R_r_sI_all_late = R_r_sI_all_late[:late_idx, :]
+    atten_all_late = atten_all_late[:late_idx, :]
+    A_late = A_late[:late_idx, :]
 
     if params["ifRemoveDirectPath"]:
-        print("Remove the direct path")
-        try:
-            idx = A_early.index([0, 0, 0, 0, 0, 0])
-            R_sI_r_all_early.pop(idx)
-            R_s_rI_all_early.pop(idx)
-            R_r_sI_all_early.pop(idx)
-            atten_all_early.pop(idx)
-            A_early.pop(idx)
-        except ValueError:
-            print("Direct path not found in early reflections")
-
+        # Find the direct path index (q_x=q_y=q_z=p_x=p_y=p_z=0)
+        direct_path_mask = np.all(A_early == 0, axis=1)
+        if np.any(direct_path_mask):
+            direct_path_idx = np.where(direct_path_mask)[0][0]
+            A_early = np.delete(A_early, direct_path_idx, axis=0)
+            R_sI_r_all_early = np.delete(R_sI_r_all_early, direct_path_idx, axis=0)
+            R_s_rI_all_early = np.delete(R_s_rI_all_early, direct_path_idx, axis=0)
+            R_r_sI_all_early = np.delete(R_r_sI_all_early, direct_path_idx, axis=0)
+            atten_all_early = np.delete(atten_all_early, direct_path_idx, axis=0)
     images = {
         "R_sI_r_all_early": R_sI_r_all_early,
         "R_s_rI_all_early": R_s_rI_all_early,
