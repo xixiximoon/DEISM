@@ -20,7 +20,8 @@ def test_deism_arg_simulation():
     deism.update_freqs()
     deism.update_source_receiver()
     deism.update_directivities()
-    pressure = deism.run_DEISM()
+    deism.run_DEISM()
+    pressure = deism.params["RTF"]
 
     # Basic assertions to verify the simulation ran successfully
     assert pressure is not None, "Pressure should not be None"
