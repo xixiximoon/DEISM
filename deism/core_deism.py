@@ -559,7 +559,7 @@ class DEISM:
 
         return window
 
-    def run_DEISM(self, if_clean_up: bool = True):
+    def run_DEISM(self, if_clean_up: bool = True, if_shutdown_ray: bool = True):
         """
         Run DEISM
         """
@@ -573,11 +573,10 @@ class DEISM:
         elif self.roomtype == "convex":
             self.params["RTF"] = run_DEISM_ARG(self.params)
         # Shutdown Ray
-        ray.shutdown()
+        if if_shutdown_ray:
+            ray.shutdown()
         # Clean up large matrices in self.params, e.g., params["images"]
         if if_clean_up:
-            import gc
-
             # Delete the images dictionary (and all its contents)
             # Note: In CPython, del dict[key] immediately decrements reference counts
             # of all values, so deleting contents first is not necessary, but we do it

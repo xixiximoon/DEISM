@@ -1,6 +1,6 @@
 # here is the configuration file for single set of parameters
 # Note: 
-SilentMode: 1 # 1 means no output in the console, 0 means output in the console
+SilentMode: 0 # 1 means no output in the console, 0 means output in the console
 # Use space instead of tab for indentation at the beginning of each line
 # 1. Environment parameters
 Environment:
@@ -57,7 +57,7 @@ Positions:
 # 5. About the result signal terms
 Signal:
   # unit of frequency(Hz)
-  samplingRate: 44100
+  samplingRate: 48000
   overSamplingFactor: 1 # 1 means no over sampling, 2 means 2x over sampling, etc.
   RIRLength: 1 # in seconds
 
